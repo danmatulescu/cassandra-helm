@@ -1,0 +1,64 @@
+{{- $fullname := include "cassandra.fullname" . }}
+{{- $ns := .Release.Namespace }}
+{{- range $kind := splitList "," (include "cassandra.tlsKinds" .) | compact }}
+{{- $t := index $.Values.tls $kind }}
+{{- if $t.certManager.enabled }}
+{{- $cm := $t.certManager }}
+---
+{{- if eq $kind "internode" }}
+# One certificate shared by all nodes. Peers authenticate each other through
+# the CA (mutual TLS); hostname verification is off because pod IPs change.
+{{- else }}
+# Server certificate for CQL on 9042. Covers the client Service and the pod
+# names; drivers that connect to peer IPs need hostname validation off (CA
+# validation stays on).
+{{- end }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}-{{ $kind }}
+  labels:
+    {{- include "cassandra.labels" $ | nindent 4 }}
+spec:
+  secretName: {{ include "cassandra.tlsSecretName" (dict "ctx" $ "kind" $kind) }}
+  commonName: {{ if eq $kind "client" }}{{ $fullname }}-client{{ else }}{{ $fullname }}{{ end }}
+  dnsNames:
+    {{- if eq $kind "client" }}
+    - {{ $fullname }}-client
+    - {{ $fullname }}-client.{{ $ns }}
+    - {{ $fullname }}-client.{{ $ns }}.svc
+    - {{ $fullname }}-client.{{ $ns }}.svc.cluster.local
+    {{- end }}
+    - {{ $fullname }}
+    - "*.{{ $fullname }}"
+    - "*.{{ $fullname }}.{{ $ns }}.svc"
+    - "*.{{ $fullname }}.{{ $ns }}.svc.cluster.local"
+    {{- range $cm.extraDnsNames }}
+    - {{ . | quote }}
+    {{- end }}
+  duration: {{ $cm.duration }}
+  renewBefore: {{ $cm.renewBefore }}
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Always
+  usages:
+    - server auth
+    - client auth
+    - digital signature
+    - key encipherment
+  issuerRef:
+    name: {{ required (printf "tls.%s.certManager.issuerRef.name is required when tls.%s.enabled=true" $kind $kind) $cm.issuerRef.name }}
+    kind: {{ $cm.issuerRef.kind }}
+    group: {{ $cm.issuerRef.group }}
+  keystores:
+    pkcs12:
+      create: true
+      {{- with $cm.pkcs12Profile }}
+      profile: {{ . }}
+      {{- end }}
+      passwordSecretRef:
+        name: {{ include "cassandra.tlsPasswordSecretName" (dict "ctx" $ "kind" $kind) }}
+        key: password
+{{- end }}
+{{- end }}

@@ -1,0 +1,38 @@
+Cassandra {{ .Chart.AppVersion }}: {{ .Values.replicaCount }} nodes, cluster "{{ .Values.cluster.name }}", DC "{{ .Values.cluster.datacenter }}".
+Image: {{ include "cassandra.image" . }}
+
+Watch the nodes join (one at a time, a few minutes each):
+  kubectl -n {{ .Release.Namespace }} rollout status statefulset/{{ include "cassandra.fullname" . }} --timeout=30m
+  kubectl -n {{ .Release.Namespace }} exec {{ include "cassandra.fullname" . }}-0 -c cassandra -- nodetool status
+
+Applications connect to:
+  {{ include "cassandra.fullname" . }}-client.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+{{- if .Values.auth.enabled }}
+
+Superuser credentials are in Secret {{ include "cassandra.superuserSecretName" . }} (keys: username, password):
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "cassandra.superuserSecretName" . }} -o jsonpath='{.data.password}' | base64 -d
+{{- if .Values.auth.superuser.disableDefault }}
+The built-in cassandra/cassandra role has been disabled.
+{{- end }}
+Create separate, non-superuser roles for applications.
+{{- end }}
+{{- if .Values.tls.internode.enabled }}
+
+{{- $e := .Values.tls.internode.encryption }}
+{{- if not .Values.tls.internode.optional }}
+Internode TLS: enforced (encryption={{ $e }}, mutual TLS, stores from Secret {{ include "cassandra.tlsSecretName" (dict "ctx" . "kind" "internode") }}).
+{{- else if eq $e "none" }}
+Internode TLS: TRANSITION STEP 1/3 (keystores loaded, TLS accepted, still sending plaintext).
+Once every pod has restarted: upgrade with tls.internode.encryption=all, tls.internode.optional=true.
+{{- else }}
+Internode TLS: TRANSITION STEP 2/3 (sending TLS, plaintext peers still accepted).
+Once every pod has restarted: upgrade with tls.internode.optional=false.
+{{- end }}
+{{- end }}
+{{- if .Values.tls.client.enabled }}
+
+Client TLS on {{ .Values.service.port }}: {{ if .Values.tls.client.optional }}ON, plaintext still accepted (optional=true){{ else }}required{{ end }}{{ if .Values.tls.client.requireClientAuth }}, client certificates required{{ end }}.
+CA for clients: Secret {{ include "cassandra.tlsSecretName" (dict "ctx" . "kind" "client") }}, key ca.crt. cqlsh inside a pod:
+  kubectl -n {{ .Release.Namespace }} exec -it {{ include "cassandra.fullname" . }}-0 -c cassandra -- bash -c \
+    'printf "[ssl]\ncertfile=/etc/cassandra/tls/client/ca.crt\n{{ if .Values.tls.client.requireClientAuth }}userkey=/etc/cassandra/tls/client/tls.key\nusercert=/etc/cassandra/tls/client/tls.crt\n{{ end }}" > /tmp/rc; cqlsh --ssl --cqlshrc /tmp/rc -u <user>'
+{{- end }}

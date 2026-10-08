@@ -1,0 +1,35 @@
+# Headless service: stable per-pod DNS names, used for seeds.
+# publishNotReadyAddresses lets peers resolve each other while bootstrapping.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cassandra.fullname" . }}
+  labels:
+    {{- include "cassandra.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "cassandra.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: intra-node
+      port: 7000
+    - name: cql
+      port: 9042
+---
+# What applications connect to. Drivers use it for the initial contact only
+# and then discover all peers themselves.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cassandra.fullname" . }}-client
+  labels:
+    {{- include "cassandra.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "cassandra.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: cql
+      port: {{ .Values.service.port }}
+      targetPort: cql

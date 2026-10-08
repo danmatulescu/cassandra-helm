@@ -1,0 +1,226 @@
+global:
+  # Overrides the registry of every image in the chart (Cassandra and the
+  # kubectl maintenance image), e.g. "registry.internal.example:5000".
+  imageRegistry: ""
+  # Pull secrets for a private registry, as names of existing Secrets:
+  # [{name: regcred}]
+  imagePullSecrets: []
+
+image:
+  registry: docker.io
+  repository: library/cassandra
+  tag: "4.1.11"
+  # If set, used instead of the tag: "sha256:..."
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# One pod per Kubernetes node is enforced, so you need at least this many nodes.
+replicaCount: 3
+
+cluster:
+  # cluster.name and datacenter cannot easily be changed after first start.
+  name: cassandra-k8s
+  datacenter: dc1
+  rack: rack1
+  # The first N pods act as seeds.
+  seedCount: 2
+
+auth:
+  # PasswordAuthenticator + CassandraAuthorizer.
+  enabled: true
+  superuser:
+    # A post-install/post-upgrade Job creates this superuser from the Secret,
+    # raises system_auth replication to min(3, replicaCount) and disables the
+    # built-in cassandra/cassandra role.
+    name: admin
+    # Existing Secret with keys "username" and "password". If empty, the chart
+    # creates <release>-cassandra-superuser with a random 32-char password
+    # (kept across upgrades and not deleted on uninstall).
+    existingSecret: ""
+    # Disable the built-in cassandra/cassandra role once the superuser works.
+    disableDefault: true
+  bootstrapJob:
+    # The Job waits for every node to join, so on first install run helm with
+    # --timeout 30m (helm waits for hook Jobs; the default is 5m).
+    activeDeadlineSeconds: 1800
+
+tls:
+  internode:
+    # Encrypt node-to-node traffic (storage port 7000) with mutual TLS.
+    enabled: false
+    # Outbound encryption (internode_encryption): all | dc | rack | none.
+    encryption: all
+    # Also accept plaintext peers. Only for turning TLS on in an already
+    # running cluster, which takes three rolling restarts:
+    #   1. encryption=none, optional=true  - load keystores, accept TLS
+    #   2. encryption=all,  optional=true  - send TLS, still accept plaintext
+    #   3. encryption=all,  optional=false - TLS only
+    # A new cluster can start directly at step 3.
+    optional: false
+    requireClientAuth: true
+    # Hostname verification stays off: pod IPs change on reschedule. Peers are
+    # authenticated by the CA (requireClientAuth) instead.
+    requireEndpointVerification: false
+    storeType: PKCS12
+    keystoreFile: keystore.p12
+    truststoreFile: truststore.p12
+
+    # A) cert-manager issues one certificate for all nodes and writes PKCS12
+    #    keystore + truststore into the Secret. The issuer must provide a CA
+    #    (CA / Vault / self-signed issuers do, ACME does not), or no truststore
+    #    is written.
+    certManager:
+      enabled: true
+      issuerRef:
+        name: ""
+        kind: Issuer
+        group: cert-manager.io
+      duration: 8760h
+      renewBefore: 720h
+      # Modern2023 = AES-256/PBKDF2, supported by the Java 11 in the image.
+      pkcs12Profile: Modern2023
+      extraDnsNames: []
+
+    # B) Bring your own (certManager.enabled=false): a Secret containing
+    #    keystoreFile and truststoreFile, of type storeType.
+    existingSecret: ""
+
+    # Secret with key "password" for the keystore and truststore. If empty,
+    # the chart generates one (kept across upgrades). For B) it must be the
+    # password your stores were created with.
+    passwordSecret: ""
+
+  client:
+    # TLS for CQL clients on port 9042 (client_encryption_options).
+    enabled: false
+    # Also accept plaintext CQL on 9042. Use while migrating existing clients
+    # to TLS, then set back to false.
+    optional: false
+    # Require client certificates (mutual TLS for CQL). Clients then need a
+    # certificate signed by the CA in the truststore, in addition to their
+    # username/password.
+    requireClientAuth: false
+    storeType: PKCS12
+    keystoreFile: keystore.p12
+    truststoreFile: truststore.p12
+
+    # Same two options as tls.internode; the issuer may be the same one.
+    # With a single CA, nodes would accept an application's client
+    # certificate on port 7000 as well, so keep networkPolicy.enabled=true:
+    # it limits port 7000 to the Cassandra pods.
+    certManager:
+      enabled: true
+      issuerRef:
+        name: ""
+        kind: Issuer
+        group: cert-manager.io
+      duration: 8760h
+      renewBefore: 720h
+      pkcs12Profile: Modern2023
+      # The cert covers the client Service and pod DNS names. Add any other
+      # names clients use to connect.
+      extraDnsNames: []
+    # Bring your own: must contain keystoreFile and truststoreFile, plus
+    # ca.crt (PEM) for the auth bootstrap Job's cqlsh. With
+    # requireClientAuth also tls.crt and tls.key (PEM). Secrets created by
+    # cert-manager have all of these.
+    existingSecret: ""
+    passwordSecret: ""
+
+# Extra cassandra.yaml settings, merged over the stock 4.1 cassandra.yaml that
+# ships with the chart (files/cassandra-4.1.yaml). Nested maps are merged;
+# lists replace. Changing this triggers a rolling restart.
+#
+# These keys are set by the chart and cannot be overridden here:
+# cluster_name, seed_provider, listen_address, rpc_address,
+# broadcast_rpc_address, endpoint_snitch, and when enabled authenticator /
+# authorizer (auth.enabled) and the server_encryption_options keys the chart
+# sets (tls.internode.enabled). Other server_encryption_options keys, such as
+# cipher_suites or accepted_protocols, can still be set.
+#
+# Example:
+#   config:
+#     concurrent_compactors: 2
+#     compaction_throughput: 32MiB/s
+#     read_request_timeout: 10000ms
+#     gc_warn_threshold: 1000ms
+config: {}
+
+# Heap is written to jvm-server.options. Keep heap at ~40-50% of the memory
+# limit (max 8G) and newSize at ~100M per CPU core (CMS).
+jvm:
+  heap: 2G
+  newSize: 400M
+
+resources:
+  requests:
+    cpu: 1500m
+    memory: 5Gi
+  limits:
+    # No CPU limit on purpose: throttling causes long GC pauses.
+    memory: 5Gi
+
+persistence:
+  # volumeClaimTemplates are immutable: size and class cannot change via
+  # helm upgrade (expand existing PVCs directly instead).
+  size: 20Gi
+  storageClass: ""
+  # Keep PVCs when the release is uninstalled or scaled down.
+  retain: true
+
+terminationGracePeriodSeconds: 180
+
+# Allows 10 minutes for commitlog replay before liveness takes over.
+startupProbe:
+  periodSeconds: 10
+  failureThreshold: 60
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+service:
+  type: ClusterIP
+  port: 9042
+
+# Ingress allow-list for the Cassandra pods. Port 7000 (internode) accepts only
+# other Cassandra pods of this release. This matters most when internode and
+# client certificates come from the same CA: Cassandra 4.1 accepts any
+# certificate from the trusted CA as a peer, so the network has to keep
+# everything else away from 7000. Needs a CNI that enforces NetworkPolicy
+# (Cilium, Calico, ...); otherwise the policy is silently ignored.
+networkPolicy:
+  enabled: true
+  # Who may connect to CQL (9042), as NetworkPolicy "from" peers. Empty = any
+  # source. The chart's own auth bootstrap Job is always allowed. Example:
+  #   cqlFrom:
+  #     - namespaceSelector:
+  #         matchLabels: {kubernetes.io/metadata.name: my-app}
+  #     - podSelector:
+  #         matchLabels: {app: reporting}
+  cqlFrom: []
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+
+# Repair and snapshots run nodetool inside the Cassandra pods via kubectl exec,
+# so JMX is never exposed over the network.
+maintenance:
+  image:
+    registry: registry.k8s.io
+    repository: kubectl
+    tag: v1.36.5
+    digest: ""
+    pullPolicy: IfNotPresent
+  repair:
+    # Must complete on every node within gc_grace_seconds (default 10 days).
+    enabled: true
+    schedule: "0 1 * * 0"
+    deadlineSeconds: 21600
+  snapshot:
+    # Hard links on the same PVC, tagged by weekday (7 kept). Not an
+    # off-site backup: copy them to object storage for that.
+    enabled: true
+    schedule: "0 2 * * *"
+    deadlineSeconds: 3600

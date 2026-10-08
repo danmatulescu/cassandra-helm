@@ -1,0 +1,132 @@
+{{- if or .Values.maintenance.repair.enabled .Values.maintenance.snapshot.enabled }}
+{{- $fullname := include "cassandra.fullname" . }}
+{{- $replicas := int .Values.replicaCount }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-maintenance
+  labels:
+    {{- include "cassandra.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-maintenance
+  labels:
+    {{- include "cassandra.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+    resourceNames:
+      {{- range $i := until $replicas }}
+      - {{ $fullname }}-{{ $i }}
+      {{- end }}
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+    resourceNames:
+      {{- range $i := until $replicas }}
+      - {{ $fullname }}-{{ $i }}
+      {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-maintenance
+  labels:
+    {{- include "cassandra.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-maintenance
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-maintenance
+{{- end }}
+{{- if .Values.maintenance.repair.enabled }}
+{{- $fullname := include "cassandra.fullname" . }}
+{{- $last := sub (int .Values.replicaCount) 1 | int }}
+---
+# Primary-range full repair, one node after another (init containers run in
+# order, the last node is the main container).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}-repair
+  labels:
+    {{- include "cassandra.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.maintenance.repair.schedule | quote }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: {{ .Values.maintenance.repair.deadlineSeconds }}
+      template:
+        spec:
+          serviceAccountName: {{ $fullname }}-maintenance
+          restartPolicy: Never
+          {{- include "cassandra.imagePullSecrets" . | nindent 10 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          {{- if gt $last 0 }}
+          initContainers:
+            {{- range $i := until $last }}
+            - name: repair-{{ $i }}
+              image: {{ include "cassandra.maintenanceImage" $ }}
+              imagePullPolicy: {{ $.Values.maintenance.image.pullPolicy }}
+              args: ["exec", "{{ $fullname }}-{{ $i }}", "-c", "cassandra", "--", "nodetool", "repair", "-full", "-pr"]
+              securityContext:
+                {{- include "cassandra.restrictedContainerSecurityContext" $ | nindent 16 }}
+            {{- end }}
+          {{- end }}
+          containers:
+            - name: repair-{{ $last }}
+              image: {{ include "cassandra.maintenanceImage" . }}
+              imagePullPolicy: {{ .Values.maintenance.image.pullPolicy }}
+              args: ["exec", "{{ $fullname }}-{{ $last }}", "-c", "cassandra", "--", "nodetool", "repair", "-full", "-pr"]
+              securityContext:
+                {{- include "cassandra.restrictedContainerSecurityContext" . | nindent 16 }}
+{{- end }}
+{{- if .Values.maintenance.snapshot.enabled }}
+{{- $fullname := include "cassandra.fullname" . }}
+---
+# Snapshot on all nodes at the same time, tagged by weekday (7 kept).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}-snapshot
+  labels:
+    {{- include "cassandra.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.maintenance.snapshot.schedule | quote }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: {{ .Values.maintenance.snapshot.deadlineSeconds }}
+      template:
+        spec:
+          serviceAccountName: {{ $fullname }}-maintenance
+          restartPolicy: Never
+          {{- include "cassandra.imagePullSecrets" . | nindent 10 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            {{- range $i := until (int .Values.replicaCount) }}
+            - name: snapshot-{{ $i }}
+              image: {{ include "cassandra.maintenanceImage" $ }}
+              imagePullPolicy: {{ $.Values.maintenance.image.pullPolicy }}
+              args: ["exec", "{{ $fullname }}-{{ $i }}", "-c", "cassandra", "--", "bash", "-c",
+                     "tag=daily-$(date +%a); nodetool clearsnapshot -t $tag || true; nodetool snapshot -t $tag"]
+              securityContext:
+                {{- include "cassandra.restrictedContainerSecurityContext" $ | nindent 16 }}
+            {{- end }}
+{{- end }}

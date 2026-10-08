@@ -1,0 +1,69 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $fullname := include "cassandra.fullname" . }}
+# helm test: checks that the CNI really enforces the NetworkPolicy. Runs as an
+# "outsider" pod (deliberately without the Cassandra selector labels):
+#   - 9042 on every node must accept TCP (control: node up, path open)
+#   - 7000 on every node must NOT accept TCP (internode port blocked)
+# A CNI without NetworkPolicy support accepts the policy object and ignores it;
+# this test is how you find out.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ $fullname }}-test-networkpolicy
+  labels:
+    app.kubernetes.io/name: {{ include "cassandra.name" . }}-netpol-test
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  annotations:
+    helm.sh/hook: test
+    # Kept after the run so "helm test --logs" can show the result; replaced
+    # on the next run.
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  restartPolicy: Never
+  {{- include "cassandra.imagePullSecrets" . | nindent 2 }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test
+      image: {{ include "cassandra.image" . }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      command: ["python3", "-c"]
+      args:
+        - |
+          import socket, sys
+          nodes = [f"{{ $fullname }}-{i}.{{ $fullname }}" for i in range({{ int .Values.replicaCount }})]
+
+          def tcp(host, port, timeout=5):
+              try:
+                  socket.create_connection((host, port), timeout=timeout).close()
+                  return "open"
+              except socket.timeout:
+                  return "timeout"
+              except OSError as e:
+                  return type(e).__name__
+
+          failed = False
+          for host in nodes:
+              cql, internode = tcp(host, 9042), tcp(host, 7000)
+              if cql != "open":
+                  print(f"FAIL {host}: 9042 not reachable ({cql}); cannot tell a blocked 7000 from a down node")
+                  failed = True
+              elif internode == "open":
+                  print(f"FAIL {host}: 7000 reachable from a non-Cassandra pod; the CNI is NOT enforcing NetworkPolicy")
+                  failed = True
+              else:
+                  print(f"ok   {host}: 9042 open, 7000 blocked ({internode})")
+          sys.exit(1 if failed else 0)
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          memory: 128Mi
+      securityContext:
+        {{- include "cassandra.restrictedContainerSecurityContext" . | nindent 8 }}
+{{- end }}

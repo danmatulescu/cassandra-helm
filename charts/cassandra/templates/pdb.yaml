@@ -1,0 +1,14 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# With RF=3 and (LOCAL_)QUORUM, at most one replica may be down.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cassandra.fullname" . }}
+  labels:
+    {{- include "cassandra.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "cassandra.selectorLabels" . | nindent 6 }}
+{{- end }}

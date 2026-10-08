@@ -1,0 +1,121 @@
+{{- if .Values.auth.enabled }}
+# Separate from the config ConfigMap so script changes don't restart the pods.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cassandra.fullname" . }}-auth-bootstrap
+  labels:
+    {{- include "cassandra.labels" . | nindent 4 }}
+data:
+  # Run by the post-install/post-upgrade Job. Idempotent.
+  auth-bootstrap.sh: |
+    #!/bin/bash
+    set -uo pipefail
+    shopt -u patsub_replacement 2>/dev/null || true
+    export HOME=/tmp
+
+    want_peers=$((REPLICAS - 1))
+    ident() { printf '"%s"' "${1//\"/\"\"}"; }   # CQL quoted identifier
+    lit()   { printf "'%s'" "${1//\'/\'\'}"; }   # CQL string literal
+    # Client TLS: verify the server against the CA; present a client
+    # certificate when the cluster requires one.
+    cqlsh_opts=()
+    if [ "$CLIENT_TLS" = true ]; then
+      [ -s /tls/client/ca.crt ] || { echo "ERROR: ca.crt missing from the client TLS Secret" >&2; exit 1; }
+      {
+        echo "[ssl]"
+        echo "certfile = /tls/client/ca.crt"
+        echo "validate = true"
+        if [ "$CLIENT_CERT" = true ]; then
+          echo "userkey = /tls/client/tls.key"
+          echo "usercert = /tls/client/tls.crt"
+        fi
+      } > /tmp/cqlshrc
+      cqlsh_opts=(--ssl --cqlshrc /tmp/cqlshrc)
+    fi
+    cql() {
+      local user=$1 pass=$2; shift 2
+      cqlsh "${cqlsh_opts[@]}" "$CQL_HOST" 9042 -u "$user" -p "$pass" --request-timeout=60 "$@" 2>&1
+    }
+    peer_count() {
+      cql "$1" "$2" -e 'SELECT count(*) FROM system.peers' | awk '/^ *[0-9]+ *$/ {print $1; exit}'
+    }
+
+    # 1. Wait until CQL answers and every node has joined, using whichever
+    #    login works: the configured superuser, or the default role on a
+    #    fresh cluster.
+    login=""
+    for attempt in $(seq 1 360); do
+      for who in superuser default; do
+        if [ "$who" = superuser ]; then u=$SU_USER; p=$SU_PASS; else u=cassandra; p=cassandra; fi
+        n=$(peer_count "$u" "$p")
+        [ -n "$n" ] || continue
+        if [ "$n" -ge "$want_peers" ]; then login=$who; break 2; fi
+        echo "logged in as $u; $((n + 1))/$REPLICAS nodes joined"
+        break
+      done
+      [ $((attempt % 6)) -eq 1 ] && echo "waiting for the cluster (attempt $attempt)"
+      sleep 5
+    done
+    if [ -z "$login" ]; then
+      echo "ERROR: cannot log in as '$SU_USER' (password from the Secret) or as the default cassandra role." >&2
+      echo "If the superuser exists with a different password, update the Secret to match it." >&2
+      exit 1
+    fi
+
+    replication="{'class': 'NetworkTopologyStrategy', $(lit "$DC"): $AUTH_RF}"
+    alter_keyspaces="
+      ALTER KEYSPACE system_auth WITH replication = $replication;
+      ALTER KEYSPACE system_distributed WITH replication = $replication;
+      ALTER KEYSPACE system_traces WITH replication = $replication;"
+
+    # Retries for up to 30 minutes: Cassandra refuses replication changes
+    # while any node is not in normal state, e.g. during a rolling restart
+    # that this upgrade just started.
+    retry() {
+      local desc=$1 user=$2 pass=$3 stmt=$4 out=""
+      for attempt in $(seq 1 360); do
+        if out=$(cql "$user" "$pass" -e "$stmt"); then return 0; fi
+        [ $((attempt % 6)) -eq 1 ] && echo "$desc: retrying ($(echo "$out" | grep -v '^$' | tail -1 | cut -c1-200))"
+        sleep 5
+      done
+      echo "ERROR: $desc failed: $out" >&2
+      return 1
+    }
+
+    # 2. Fresh cluster: raise auth replication first, so the new role is
+    #    written to every replica, then create the superuser.
+    if [ "$login" = default ]; then
+      retry "raising auth replication" cassandra cassandra "$alter_keyspaces" || exit 1
+      echo "creating superuser '$SU_USER'"
+      retry "creating superuser" cassandra cassandra \
+        "CREATE ROLE IF NOT EXISTS $(ident "$SU_USER") WITH PASSWORD = $(lit "$SU_PASS") AND SUPERUSER = true AND LOGIN = true;" \
+        || exit 1
+    fi
+
+    # 3. Check the superuser login. If the role already existed with another
+    #    password, set the one from the Secret (Cassandra allows one password
+    #    change per 5s, hence the wait).
+    ok=""
+    for attempt in $(seq 1 24); do
+      if cql "$SU_USER" "$SU_PASS" -e "SELECT now() FROM system.local;" >/dev/null; then ok=1; break; fi
+      if [ "$login" = default ] && [ "$attempt" -eq 6 ]; then
+        echo "superuser login fails; setting its password from the Secret"
+        cql cassandra cassandra -e "ALTER ROLE $(ident "$SU_USER") WITH PASSWORD = $(lit "$SU_PASS") AND SUPERUSER = true AND LOGIN = true;" || true
+        sleep 6
+      fi
+      sleep 5
+    done
+    [ -n "$ok" ] || { echo "ERROR: cannot log in as '$SU_USER'" >&2; exit 1; }
+
+    # 4. As the superuser: keep replication in line with replicaCount and
+    #    disable the default role.
+    retry "setting auth replication" "$SU_USER" "$SU_PASS" "$alter_keyspaces" || exit 1
+    if [ "$DISABLE_DEFAULT" = true ] && [ "$SU_USER" != cassandra ]; then
+      retry "disabling the default cassandra role" "$SU_USER" "$SU_PASS" \
+        "ALTER ROLE cassandra WITH SUPERUSER = false AND LOGIN = false;" || exit 1
+    fi
+
+    echo "auth replication: $AUTH_RF in $DC"
+    cql "$SU_USER" "$SU_PASS" -e "LIST ROLES;"
+{{- end }}

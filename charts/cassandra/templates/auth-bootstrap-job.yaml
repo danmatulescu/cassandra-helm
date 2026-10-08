@@ -1,0 +1,86 @@
+{{- if .Values.auth.enabled }}
+{{- $fullname := include "cassandra.fullname" . }}
+# Creates the superuser from the Secret, sets system_auth replication and
+# disables cassandra/cassandra. Runs after every install/upgrade; idempotent.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-auth-bootstrap
+  labels:
+    {{- include "cassandra.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: {{ .Values.auth.bootstrapJob.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "cassandra.name" . }}-auth-bootstrap
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      restartPolicy: Never
+      {{- include "cassandra.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: auth-bootstrap
+          image: {{ include "cassandra.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["bash", "/scripts/auth-bootstrap.sh"]
+          env:
+            - name: CQL_HOST
+              value: {{ $fullname }}-client
+            - name: REPLICAS
+              value: {{ .Values.replicaCount | quote }}
+            - name: DC
+              value: {{ .Values.cluster.datacenter | quote }}
+            - name: AUTH_RF
+              value: {{ min 3 (int .Values.replicaCount) | quote }}
+            - name: DISABLE_DEFAULT
+              value: {{ .Values.auth.superuser.disableDefault | quote }}
+            - name: CLIENT_TLS
+              value: {{ .Values.tls.client.enabled | quote }}
+            - name: CLIENT_CERT
+              value: {{ and .Values.tls.client.enabled .Values.tls.client.requireClientAuth | quote }}
+            - name: SU_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cassandra.superuserSecretName" . }}
+                  key: username
+            - name: SU_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cassandra.superuserSecretName" . }}
+                  key: password
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            {{- include "cassandra.restrictedContainerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            {{- if .Values.tls.client.enabled }}
+            - name: client-tls
+              mountPath: /tls/client
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ $fullname }}-auth-bootstrap
+        {{- if .Values.tls.client.enabled }}
+        - name: client-tls
+          secret:
+            secretName: {{ include "cassandra.tlsSecretName" (dict "ctx" . "kind" "client") }}
+        {{- end }}
+{{- end }}

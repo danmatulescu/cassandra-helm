@@ -1,0 +1,167 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "cassandra.fullname" . }}
+  labels:
+    {{- include "cassandra.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "cassandra.fullname" . }}
+  replicas: {{ .Values.replicaCount }}
+  # Cassandra nodes must join one at a time.
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: {{ ternary "Retain" "Delete" .Values.persistence.retain }}
+    whenScaled: {{ ternary "Retain" "Delete" .Values.persistence.retain }}
+  selector:
+    matchLabels:
+      {{- include "cassandra.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      # Selector labels only: version/chart labels here would restart every
+      # node on each chart bump.
+      labels:
+        {{- include "cassandra.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Hash of the config data only (not its labels), so pods restart when
+        # the config changes and not otherwise.
+        checksum/config: {{ (include (print $.Template.BasePath "/configmap.yaml") . | fromYaml).data | toYaml | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "cassandra.imagePullSecrets" . | nindent 6 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999   # the cassandra user in the official image
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        # One Cassandra per Kubernetes node, otherwise losing a node can take
+        # out two replicas.
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "cassandra.selectorLabels" . | nindent 18 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: prepare-config
+          image: {{ include "cassandra.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["bash", "/config/prepare-config.sh"]
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            {{- range $kind := splitList "," (include "cassandra.tlsKinds" .) | compact }}
+            - name: {{ include "cassandra.tlsPasswordEnv" $kind }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cassandra.tlsPasswordSecretName" (dict "ctx" $ "kind" $kind) }}
+                  key: password
+            {{- end }}
+            - name: JVM_HEAP
+              value: {{ .Values.jvm.heap | quote }}
+            - name: JVM_NEWSIZE
+              value: {{ .Values.jvm.newSize | quote }}
+          securityContext:
+            {{- include "cassandra.restrictedContainerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: conf
+              mountPath: /conf
+            - name: config
+              mountPath: /config
+            {{- range $kind := splitList "," (include "cassandra.tlsKinds" .) | compact }}
+            - name: {{ $kind }}-tls
+              mountPath: /tls/{{ $kind }}
+              readOnly: true
+            {{- end }}
+      containers:
+        - name: cassandra
+          image: {{ include "cassandra.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Bypass the image entrypoint: its sed edits of cassandra.yaml would
+          # overwrite the chart's config (e.g. reset seeds to the pod's own IP).
+          command: ["cassandra", "-f"]
+          ports:
+            - name: intra-node
+              containerPort: 7000
+            - name: cql
+              containerPort: 9042
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          # The storage port opens early in startup; CQL only once the node
+          # has finished joining.
+          startupProbe:
+            tcpSocket:
+              port: intra-node
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+          livenessProbe:
+            tcpSocket:
+              port: intra-node
+            periodSeconds: 15
+            failureThreshold: 4
+          readinessProbe:
+            tcpSocket:
+              port: cql
+            periodSeconds: 10
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["nodetool", "drain"]
+          securityContext:
+            {{- include "cassandra.restrictedContainerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/cassandra
+            - name: conf
+              mountPath: /etc/cassandra
+            {{- range $kind := splitList "," (include "cassandra.tlsKinds" .) | compact }}
+            # Mounted directly (no subPath) so renewed certificates appear in
+            # place; Cassandra reloads changed key stores on its own.
+            - name: {{ $kind }}-tls
+              mountPath: /etc/cassandra/tls/{{ $kind }}
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: conf
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: {{ include "cassandra.fullname" . }}-config
+            defaultMode: 0555
+        {{- range $kind := splitList "," (include "cassandra.tlsKinds" .) | compact }}
+        - name: {{ $kind }}-tls
+          secret:
+            secretName: {{ include "cassandra.tlsSecretName" (dict "ctx" $ "kind" $kind) }}
+        {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "cassandra.selectorLabels" . | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}

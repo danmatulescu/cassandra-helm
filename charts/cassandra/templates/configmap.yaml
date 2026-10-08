@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cassandra.fullname" . }}-config
+  labels:
+    {{- include "cassandra.labels" . | nindent 4 }}
+data:
+  cassandra.yaml: |
+    {{- include "cassandra.cassandraYaml" . | nindent 4 }}
+
+  cassandra-rackdc.properties: |
+    dc={{ .Values.cluster.datacenter }}
+    rack={{ .Values.cluster.rack }}
+
+  # Copies the image's stock config dir (jvm options, logback, ...) into a
+  # writable emptyDir, then puts the chart's cassandra.yaml on top and fills in
+  # the per-pod values.
+  prepare-config.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    # bash 5.2 treats '&' in ${x//pat/repl} as the match; passwords may contain it.
+    shopt -u patsub_replacement 2>/dev/null || true
+
+    cp -r /etc/cassandra/. /conf/
+    cp /config/cassandra-rackdc.properties /conf/
+
+    cfg=$(cat /config/cassandra.yaml)
+    cfg=${cfg//__POD_IP__/$POD_IP}
+    {{- range $kind := splitList "," (include "cassandra.tlsKinds" .) | compact }}
+    {{- $t := index $.Values.tls $kind }}
+
+    # {{ $kind }} TLS
+    for f in {{ $t.keystoreFile }} {{ $t.truststoreFile }}; do
+      if [ ! -s "/tls/{{ $kind }}/$f" ]; then
+        echo "ERROR: /tls/{{ $kind }}/$f missing in Secret {{ include "cassandra.tlsSecretName" (dict "ctx" $ "kind" $kind) }}" >&2
+        exit 1
+      fi
+    done
+    pw=${ {{- include "cassandra.tlsPasswordEnv" $kind }}//\'/\'\'}
+    cfg=${cfg//{{ include "cassandra.tlsPasswordPlaceholder" $kind }}/\'$pw\'}
+    {{- end }}
+    printf '%s\n' "$cfg" > /conf/cassandra.yaml
+
+    sed -ri \
+      -e "s/^#?-Xms[0-9].*/-Xms${JVM_HEAP}/" \
+      -e "s/^#?-Xmx[0-9].*/-Xmx${JVM_HEAP}/" \
+      -e "s/^#?-Xmn[0-9].*/-Xmn${JVM_NEWSIZE}/" \
+      /conf/jvm-server.options
+
+    grep -E '^(cluster_name|listen_address|broadcast_rpc_address|endpoint_snitch|authenticator|authorizer):' /conf/cassandra.yaml
+    grep -A30 '^server_encryption_options:' /conf/cassandra.yaml | grep -m1 -E '^  internode_encryption:' || true
+    grep -A30 '^client_encryption_options:' /conf/cassandra.yaml | grep -m1 -E '^  enabled:' | sed 's/^ */client_encryption_options.enabled: /;s/enabled: //' || true
+    grep -E '^-Xm[sxn]' /conf/jvm-server.options
