@@ -70,6 +70,32 @@ capabilities:
   drop: ["ALL"]
 {{- end }}
 
+{{/* ---------- Maintenance ---------- */}}
+
+{{/* Validated maintenance.mode. */}}
+{{- define "cassandra.maintenanceMode" -}}
+{{- $m := .Values.maintenance.mode -}}
+{{- if not (has $m (list "cronjob" "sidecar")) -}}
+{{- fail (printf "maintenance.mode must be cronjob or sidecar (got %q)" $m) -}}
+{{- end -}}
+{{- if eq $m "sidecar" -}}
+{{- range $task := list "repair" "snapshot" -}}
+{{- $t := index $.Values.maintenance $task -}}
+{{- if and $t.enabled (not (regexMatch "^[0-9*,/-]+( +[0-9*,/-]+){4}$" (trim $t.schedule))) -}}
+{{- fail (printf "maintenance.%s.schedule %q: sidecar mode supports 5-field cron with numbers, *, lists, ranges and steps (no names or @macros)" $task $t.schedule) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $m -}}
+{{- end }}
+
+{{/* "true" when the maintenance sidecar should run. */}}
+{{- define "cassandra.maintenanceSidecar" -}}
+{{- if and (eq (include "cassandra.maintenanceMode" .) "sidecar") (or .Values.maintenance.repair.enabled .Values.maintenance.snapshot.enabled) -}}
+true
+{{- end -}}
+{{- end }}
+
 {{/* ---------- Secrets ---------- */}}
 
 {{- define "cassandra.superuserSecretName" -}}

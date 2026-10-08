@@ -204,9 +204,18 @@ podAnnotations: {}
 nodeSelector: {}
 tolerations: []
 
-# Repair and snapshots run nodetool inside the Cassandra pods via kubectl exec,
-# so JMX is never exposed over the network.
+# Scheduled repair and snapshots. JMX is never exposed over the network in
+# either mode.
 maintenance:
+  # cronjob: CronJobs run nodetool inside the Cassandra pods via kubectl exec.
+  #          Needs the kubectl image below and pods/exec RBAC. Repairs run on
+  #          one node after another.
+  # sidecar: a "maintenance" container in each Cassandra pod runs nodetool on
+  #          localhost on schedule. Uses only the Cassandra image, no RBAC.
+  #          Repairs are staggered by sidecar.repairOffsetMinutes per node.
+  #          Changing a schedule restarts the pods (it is part of the pod spec).
+  mode: cronjob
+  # cronjob mode only.
   image:
     registry: registry.k8s.io
     repository: kubectl
@@ -216,7 +225,11 @@ maintenance:
   repair:
     # Must complete on every node within gc_grace_seconds (default 10 days).
     enabled: true
+    # Cron syntax, UTC: minute hour day-of-month month day-of-week
+    # (numbers, *, lists, ranges and steps in sidecar mode; no names).
     schedule: "0 1 * * 0"
+    # cronjob: Job deadline for all nodes. sidecar: per-node timeout after
+    # which the sidecar stops waiting (the repair may continue on the server).
     deadlineSeconds: 21600
   snapshot:
     # Hard links on the same PVC, tagged by weekday (7 kept). Not an
@@ -224,3 +237,20 @@ maintenance:
     enabled: true
     schedule: "0 2 * * *"
     deadlineSeconds: 3600
+  sidecar:
+    # Node N starts its repair N x this many minutes after the schedule, so
+    # nodes repair one after another. Snapshots run on all nodes at once.
+    repairOffsetMinutes: 120
+    # A failed run (e.g. repair refused because a replica is restarting) is
+    # retried this many times, this many minutes apart. Retries run inside
+    # the same scheduled slot; a run still going when the next one is due
+    # makes that one skip.
+    retryAttempts: 3
+    retryDelayMinutes: 10
+    # Mostly idle; a nodetool run starts a JVM (128m heap) inside this limit.
+    resources:
+      requests:
+        cpu: 10m
+        memory: 128Mi
+      limits:
+        memory: 768Mi

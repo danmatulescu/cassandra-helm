@@ -5,6 +5,14 @@ Watch the nodes join (one at a time, a few minutes each):
   kubectl -n {{ .Release.Namespace }} rollout status statefulset/{{ include "cassandra.fullname" . }} --timeout=30m
   kubectl -n {{ .Release.Namespace }} exec {{ include "cassandra.fullname" . }}-0 -c cassandra -- nodetool status
 
+{{- if include "cassandra.maintenanceSidecar" . }}
+Repair/snapshots run in the "maintenance" sidecar (schedules in UTC):
+  kubectl -n {{ .Release.Namespace }} logs {{ include "cassandra.fullname" . }}-0 -c maintenance
+  kubectl -n {{ .Release.Namespace }} exec {{ include "cassandra.fullname" . }}-0 -c maintenance -- python3 /config/maintenance.py next
+{{- else if or .Values.maintenance.repair.enabled .Values.maintenance.snapshot.enabled }}
+Repair/snapshots run as CronJobs: kubectl -n {{ .Release.Namespace }} get cronjobs
+{{- end }}
+
 Applications connect to:
   {{ include "cassandra.fullname" . }}-client.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
 {{- if .Values.auth.enabled }}

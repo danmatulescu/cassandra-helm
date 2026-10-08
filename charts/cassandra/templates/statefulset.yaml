@@ -140,6 +140,46 @@ spec:
               mountPath: /etc/cassandra/tls/{{ $kind }}
               readOnly: true
             {{- end }}
+        {{- if include "cassandra.maintenanceSidecar" . }}
+        # Scheduled repair / snapshot via nodetool on localhost (JMX is shared
+        # through the pod network, never exposed). Logs: kubectl logs -c maintenance
+        - name: maintenance
+          image: {{ include "cassandra.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python3", "-u", "/config/maintenance.py"]
+          env:
+            - name: HOME
+              value: /tmp
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: REPAIR_ENABLED
+              value: {{ .Values.maintenance.repair.enabled | quote }}
+            - name: REPAIR_SCHEDULE
+              value: {{ .Values.maintenance.repair.schedule | quote }}
+            - name: REPAIR_TIMEOUT
+              value: {{ .Values.maintenance.repair.deadlineSeconds | quote }}
+            - name: REPAIR_OFFSET_MINUTES
+              value: {{ .Values.maintenance.sidecar.repairOffsetMinutes | quote }}
+            - name: SNAPSHOT_ENABLED
+              value: {{ .Values.maintenance.snapshot.enabled | quote }}
+            - name: SNAPSHOT_SCHEDULE
+              value: {{ .Values.maintenance.snapshot.schedule | quote }}
+            - name: SNAPSHOT_TIMEOUT
+              value: {{ .Values.maintenance.snapshot.deadlineSeconds | quote }}
+            - name: RETRY_ATTEMPTS
+              value: {{ .Values.maintenance.sidecar.retryAttempts | quote }}
+            - name: RETRY_DELAY_MINUTES
+              value: {{ .Values.maintenance.sidecar.retryDelayMinutes | quote }}
+          resources:
+            {{- toYaml .Values.maintenance.sidecar.resources | nindent 12 }}
+          securityContext:
+            {{- include "cassandra.restrictedContainerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+        {{- end }}
       volumes:
         - name: conf
           emptyDir: {}

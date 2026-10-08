@@ -2,7 +2,7 @@ apiVersion: v2
 name: cassandra
 description: Apache Cassandra 4.1 as a plain StatefulSet (no operator)
 type: application
-version: 0.2.2
+version: 0.3.0
 appVersion: "4.1.11"
 home: https://github.com/danmatulescu/cassandra-helm
 sources:

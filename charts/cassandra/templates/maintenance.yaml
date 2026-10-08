@@ -1,3 +1,4 @@
+{{- if eq (include "cassandra.maintenanceMode" .) "cronjob" }}
 {{- if or .Values.maintenance.repair.enabled .Values.maintenance.snapshot.enabled }}
 {{- $fullname := include "cassandra.fullname" . }}
 {{- $replicas := int .Values.replicaCount }}
@@ -129,4 +130,5 @@ spec:
               securityContext:
                 {{- include "cassandra.restrictedContainerSecurityContext" $ | nindent 16 }}
             {{- end }}
+{{- end }}
 {{- end }}

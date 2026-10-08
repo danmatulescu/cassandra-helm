@@ -8,6 +8,12 @@ data:
   cassandra.yaml: |
     {{- include "cassandra.cassandraYaml" . | nindent 4 }}
 
+  {{- if include "cassandra.maintenanceSidecar" . }}
+  # Scheduler for the maintenance sidecar (maintenance.mode=sidecar).
+  maintenance.py: |
+    {{- .Files.Get "files/maintenance.py" | nindent 4 }}
+  {{- end }}
+
   cassandra-rackdc.properties: |
     dc={{ .Values.cluster.datacenter }}
     rack={{ .Values.cluster.rack }}

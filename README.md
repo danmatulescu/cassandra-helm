@@ -8,7 +8,7 @@ A Helm chart for **Apache Cassandra 4.1** as a plain StatefulSet, with no operat
 - Internode and client (CQL) **mutual TLS**, each behind its own flag, using cert-manager or your own keystores. Renewed certificates are reloaded without a restart
 - A NetworkPolicy that limits the internode port to Cassandra pods, with a `helm test` that proves the network plugin enforces it
 - `cassandra.yaml` overrides through `config:`, merged over the stock 4.1 file
-- Weekly repair and daily snapshot CronJobs
+- Weekly repair and daily snapshots, as CronJobs or as a sidecar that needs no extra image
 - Runs under Pod Security `restricted`
 
 ## Quick start
@@ -34,7 +34,7 @@ See [charts/cassandra/README.md](charts/cassandra/README.md) for all options: TL
 | Image | Used by |
 |---|---|
 | `docker.io/library/cassandra:4.1.11` | Cassandra, the auth bootstrap Job, `helm test` |
-| `registry.k8s.io/kubectl:v1.36.5` | repair and snapshot CronJobs |
+| `registry.k8s.io/kubectl:v1.36.5` | repair and snapshot CronJobs (`maintenance.mode=cronjob` only) |
 
 ## Attribution
 

@@ -21,7 +21,7 @@ Mirror these two images. Their versions are set in `values.yaml`:
 | Image | Used by |
 |---|---|
 | `docker.io/library/cassandra:4.1.11` | Cassandra pods, the init container, the auth bootstrap Job, the `helm test` pod |
-| `registry.k8s.io/kubectl:v1.36.5` | repair and snapshot CronJobs |
+| `registry.k8s.io/kubectl:v1.36.5` | repair and snapshot CronJobs; not needed with `maintenance.mode=sidecar` |
 
 ```yaml
 global:
@@ -188,6 +188,30 @@ With auth on, it also sets `authenticator` and `authorizer`. With TLS on, it set
 Cassandra refuses to start on an unknown key, so a typo shows up as a crash of the first restarted pod, and the PDB stops it from spreading.
 If you change the image to a different minor version, replace `files/cassandra-4.1.yaml` with that version's file.
 
+## Repair and snapshots
+
+Repair is not optional. It has to complete on every node within `gc_grace_seconds` (10 days by default), or deleted data can come back.
+The chart offers two ways to schedule it, and both keep JMX off the network:
+
+| | `maintenance.mode: cronjob` (default) | `maintenance.mode: sidecar` |
+|---|---|---|
+| How | CronJobs run `nodetool` inside the pods via `kubectl exec` | a `maintenance` container in each Cassandra pod runs `nodetool` on localhost |
+| Extra image | `kubectl` | none (uses the Cassandra image) |
+| RBAC | a Role with `pods/exec` | none |
+| Repair order | strictly one node after another | node *N* starts `N × sidecar.repairOffsetMinutes` (default 120) after the schedule |
+| Changing a schedule | no restart | rolling restart (the schedule is part of the pod spec) |
+
+Schedules are 5-field cron in UTC. Sidecar mode accepts numbers, `*`, lists, ranges and steps, but not names or `@weekly`-style macros.
+In sidecar mode, a repair that runs past the next node's slot overlaps with it. Cassandra allows that, it just adds load, so leave enough offset for your data size.
+
+Sidecar mode commands:
+
+```bash
+kubectl -n cassandra logs cassandra-0 -c maintenance                                          # schedule and results
+kubectl -n cassandra exec cassandra-0 -c maintenance -- python3 /config/maintenance.py next          # upcoming runs
+kubectl -n cassandra exec cassandra-0 -c maintenance -- python3 /config/maintenance.py run repair    # run now
+```
+
 ## Other values
 
 | Value | Default | Notes |
@@ -197,5 +221,6 @@ If you change the image to a different minor version, replace `files/cassandra-4
 | `jvm.heap`, `jvm.newSize` | `2G`, `400M` | Written to `jvm-server.options`. |
 | `resources` | 1500m CPU, 5Gi memory | No CPU limit on purpose. |
 | `persistence.size`, `.storageClass` | `20Gi`, cluster default | Immutable through `helm upgrade`. Expand existing PVCs directly instead. |
-| `maintenance.repair.*` | Sundays 01:00 | `nodetool repair -full -pr`, run on one node after another. |
-| `maintenance.snapshot.*` | daily 02:00 | `daily-<weekday>` tags, 7 kept, stored on the same PVC (not off-site). |
+| `maintenance.mode` | `cronjob` | `cronjob` or `sidecar`; see [Repair and snapshots](#repair-and-snapshots). |
+| `maintenance.repair.*` | Sundays 01:00 UTC | `nodetool repair -full -pr` on each node, one node after another. |
+| `maintenance.snapshot.*` | daily 02:00 UTC | `daily-<weekday>` tags, 7 kept, stored on the same PVC (not off-site). |
