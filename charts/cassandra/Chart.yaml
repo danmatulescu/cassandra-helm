@@ -11,3 +11,5 @@ keywords:
   - cassandra
   - database
   - statefulset
+annotations:
+  artifacthub.io/license: Apache-2.0

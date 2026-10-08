@@ -39,3 +39,7 @@ See [charts/cassandra/README.md](charts/cassandra/README.md) for all options: TL
 ## Attribution
 
 `charts/cassandra/files/cassandra-4.1.yaml` is the stock configuration file from [Apache Cassandra](https://github.com/apache/cassandra) 4.1, licensed under the Apache License 2.0.
+
+## License
+
+[Apache License 2.0](LICENSE).
